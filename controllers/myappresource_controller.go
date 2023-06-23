@@ -23,9 +23,9 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	resourcev1 "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -46,6 +46,9 @@ type MyAppResourceReconciler struct {
 //+kubebuilder:rbac:groups=my.api.group,resources=myappresources,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=my.api.group,resources=myappresources/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=my.api.group,resources=myappresources/finalizers,verbs=update
+//+kubebuilder:rbac:groups=apps,resources={deployments,statefulsets},verbs=get;list;watch;create;update;patch;delete
+
+//+kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -84,21 +87,164 @@ func (r *MyAppResourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			return ctrl.Result{}, err
 		}
 	} else {
-		r.Client.Delete(ctx, r.statefulsetForRedis(myappresource))
-		r.Client.Delete(ctx, r.serviceForRedis(myappresource))
+		// Check if the objects exist, if so we should remove them
+		redisStatefulSet := r.statefulsetForRedis(myappresource)
+		redisService := r.serviceForRedis(myappresource)
+		err := r.Get(ctx, types.NamespacedName{Namespace: redisStatefulSet.Namespace, Name: redisStatefulSet.Name}, redisStatefulSet)
+		if err == nil {
+			r.Client.Delete(ctx, r.statefulsetForRedis(myappresource))
+		}
+		err = r.Get(ctx, types.NamespacedName{Namespace: redisService.Namespace, Name: redisService.Name}, redisService)
+		if err == nil {
+			r.Client.Delete(ctx, r.serviceForRedis(myappresource))
+		}
 	}
 
-	err = r.EnsureDeployment(ctx, *r.deploymentForPodinfo(myappresource))
-	if err != nil {
-		return ctrl.Result{}, err
+	// We don't want to create the app until Redis is ready if it's enabled
+	if myappresource.Spec.Redis.Enabled == true && r.IsStatefulSetReady(ctx, myappresource.Namespace, redisName(myappresource.Name)) {
+		err = r.EnsureDeployment(ctx, *r.deploymentForPodinfo(myappresource))
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		err = r.EnsureService(ctx, *r.serviceForPodinfo(myappresource))
+		if err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
-	err = r.EnsureService(ctx, *r.serviceForPodinfo(myappresource))
+	// If Redis is not enabled, we don't care if it's ready
+	if myappresource.Spec.Redis.Enabled == false {
+		err = r.EnsureDeployment(ctx, *r.deploymentForPodinfo(myappresource))
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		err = r.EnsureService(ctx, *r.serviceForPodinfo(myappresource))
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	err = r.ReconcileStatus(ctx, myappresource)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, nil
+}
+
+func (r *MyAppResourceReconciler) ReconcileStatus(ctx context.Context, myappresource *myapigroupv1alpha1.MyAppResource) (err error) {
+	log := log.FromContext(ctx)
+	changed := false
+
+	// Get latest version of MyAppResource since we will be updating it
+	err = r.Get(ctx, types.NamespacedName{Namespace: myappresource.Namespace, Name: myappresource.Name}, myappresource)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			// If the custom resource is not found then, it usually means that it was deleted or not created
+			// In this way, we will stop the reconciliation
+			log.Info("myappresource resource not found. Ignoring since object must be deleted")
+			return nil
+		}
+		// Error reading the object - requeue the request.
+		log.Error(err, "Failed to get myappresource")
+		return err
+	}
+
+	// Check if Redis is Ready
+	if myappresource.Spec.Redis.Enabled {
+		if r.IsStatefulSetReady(ctx, myappresource.Namespace, redisName(myappresource.Name)) {
+			redisReadyCondition := &metav1.Condition{
+				Type:    "RedisReady",
+				Status:  metav1.ConditionTrue,
+				Reason:  "RedisStatefulSetReady",
+				Message: "Redis StatefulSet's Replicas are ready",
+			}
+			if !meta.IsStatusConditionPresentAndEqual(myappresource.Status.Conditions, redisReadyCondition.Type, redisReadyCondition.Status) {
+				meta.SetStatusCondition(&myappresource.Status.Conditions, *redisReadyCondition)
+				changed = true
+			}
+		} else {
+			redisReadyCondition := &metav1.Condition{
+				Type:    "RedisReady",
+				Status:  metav1.ConditionFalse,
+				Reason:  "RedisStatefulSetReady",
+				Message: "Redis StatefulSet's Replicas are not ready",
+			}
+			if !meta.IsStatusConditionPresentAndEqual(myappresource.Status.Conditions, redisReadyCondition.Type, redisReadyCondition.Status) {
+				meta.SetStatusCondition(&myappresource.Status.Conditions, *redisReadyCondition)
+				changed = true
+			}
+		}
+	} else {
+		// If Redis is not enabled, make sure the condition does not exist
+		if meta.IsStatusConditionPresentAndEqual(myappresource.Status.Conditions, "RedisReady", metav1.ConditionFalse) || meta.IsStatusConditionPresentAndEqual(myappresource.Status.Conditions, "RedisReady", metav1.ConditionTrue) {
+			meta.RemoveStatusCondition(&myappresource.Status.Conditions, "RedisReady")
+			changed = true
+		}
+	}
+
+	if r.IsDeploymentReady(ctx, myappresource.Namespace, podinfoName(myappresource.Name)) {
+		podinfoReadyCondition := &metav1.Condition{
+			Type:    "PodinfoReady",
+			Status:  metav1.ConditionTrue,
+			Reason:  "PodinfoDeploymentReady",
+			Message: "Podinfo's Deployment's Replicas are ready",
+		}
+		if !meta.IsStatusConditionPresentAndEqual(myappresource.Status.Conditions, podinfoReadyCondition.Type, podinfoReadyCondition.Status) {
+			meta.SetStatusCondition(&myappresource.Status.Conditions, *podinfoReadyCondition)
+			changed = true
+		}
+	} else {
+		podinfoReadyCondition := &metav1.Condition{
+			Type:    "PodinfoReady",
+			Status:  metav1.ConditionFalse,
+			Reason:  "PodinfoDeploymentReady",
+			Message: "Podinfo's Deployment's Replicas are not ready",
+		}
+		if !meta.IsStatusConditionPresentAndEqual(myappresource.Status.Conditions, podinfoReadyCondition.Type, podinfoReadyCondition.Status) {
+			meta.SetStatusCondition(&myappresource.Status.Conditions, *podinfoReadyCondition)
+			changed = true
+		}
+	}
+
+	if changed == true {
+		err = r.Status().Update(ctx, myappresource)
+		if err != nil {
+			log.Error(err, "Failed to update status")
+			return
+		}
+	}
+	return
+}
+
+func (r *MyAppResourceReconciler) IsStatefulSetReady(ctx context.Context, namespace string, name string) bool {
+	statefulset := &appsv1.StatefulSet{}
+	err := r.Client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, statefulset)
+	if err != nil {
+		return false
+	}
+
+	if statefulset.Status.ReadyReplicas == *statefulset.Spec.Replicas {
+		return true
+	}
+
+	return false
+}
+
+func (r *MyAppResourceReconciler) IsDeploymentReady(ctx context.Context, namespace string, name string) bool {
+	deployment := &appsv1.Deployment{}
+	err := r.Client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, deployment)
+	if err != nil {
+		return false
+	}
+
+	if deployment.Status.ReadyReplicas == *deployment.Spec.Replicas {
+		return true
+	}
+
+	return false
 }
 
 func (r *MyAppResourceReconciler) EnsureDeployment(ctx context.Context, deployment appsv1.Deployment) error {
@@ -222,7 +368,7 @@ func (r *MyAppResourceReconciler) serviceForPodinfo(myappresource *myapigroupv1a
 	lbls := labelsForPodInfo(myappresource)
 
 	service := &corev1.Service{
-		ObjectMeta: v1.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      podinfoName(myappresource.Name),
 			Namespace: myappresource.Namespace,
 			Labels:    lbls,
@@ -240,7 +386,7 @@ func (r *MyAppResourceReconciler) serviceForPodinfo(myappresource *myapigroupv1a
 		},
 	}
 
-	controllerutil.SetOwnerReference(myappresource, service, r.Scheme)
+	controllerutil.SetControllerReference(myappresource, service, r.Scheme)
 
 	return service
 }
@@ -249,7 +395,7 @@ func (r *MyAppResourceReconciler) serviceForRedis(myappresource *myapigroupv1alp
 	lbls := labelsForRedis(myappresource)
 
 	service := &corev1.Service{
-		ObjectMeta: v1.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      redisName(myappresource.Name),
 			Namespace: myappresource.Namespace,
 			Labels:    lbls,
@@ -267,7 +413,7 @@ func (r *MyAppResourceReconciler) serviceForRedis(myappresource *myapigroupv1alp
 		},
 	}
 
-	controllerutil.SetOwnerReference(myappresource, service, r.Scheme)
+	controllerutil.SetControllerReference(myappresource, service, r.Scheme)
 
 	return service
 }
@@ -276,7 +422,7 @@ func (r MyAppResourceReconciler) deploymentForPodinfo(myappresource *myapigroupv
 	lbls := labelsForPodInfo(myappresource)
 
 	deployment := &appsv1.Deployment{
-		ObjectMeta: v1.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      podinfoName(myappresource.Name),
 			Namespace: myappresource.Namespace,
 			Labels:    lbls,
@@ -333,6 +479,22 @@ func (r MyAppResourceReconciler) deploymentForPodinfo(myappresource *myapigroupv
 								corev1.ResourceMemory: resourcev1.MustParse(myappresource.Spec.Resources.MemoryLimit),
 							},
 						},
+						LivenessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								HTTPGet: &corev1.HTTPGetAction{
+									Path: "/healthz",
+									Port: intstr.FromString("podinfo"),
+								},
+							},
+						},
+						ReadinessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								HTTPGet: &corev1.HTTPGetAction{
+									Path: "/readyz",
+									Port: intstr.FromString("podinfo"),
+								},
+							},
+						},
 					}},
 				},
 			},
@@ -346,64 +508,7 @@ func (r MyAppResourceReconciler) deploymentForPodinfo(myappresource *myapigroupv
 		})
 	}
 
-	controllerutil.SetOwnerReference(myappresource, deployment, r.Scheme)
-
-	return deployment
-}
-
-func (r MyAppResourceReconciler) deploymentForRedis(myappresource *myapigroupv1alpha1.MyAppResource) *appsv1.Deployment {
-	lbls := labelsForRedis(myappresource)
-
-	var replicas int32
-	replicas = 1
-
-	deployment := &appsv1.Deployment{
-		ObjectMeta: v1.ObjectMeta{
-			Name:      redisName(myappresource.Name),
-			Namespace: myappresource.Namespace,
-			Labels:    lbls,
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: lbls,
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: lbls,
-				},
-				Spec: corev1.PodSpec{
-					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot: &[]bool{true}[0],
-						SeccompProfile: &corev1.SeccompProfile{
-							Type: corev1.SeccompProfileTypeRuntimeDefault,
-						},
-					},
-					Containers: []corev1.Container{{
-						Image:           "redis:" + myappresource.Spec.Redis.Tag,
-						Name:            "redis",
-						ImagePullPolicy: corev1.PullIfNotPresent,
-						SecurityContext: &corev1.SecurityContext{
-							RunAsNonRoot:             &[]bool{true}[0],
-							RunAsUser:                &[]int64{1001}[0],
-							AllowPrivilegeEscalation: &[]bool{false}[0],
-							Capabilities: &corev1.Capabilities{
-								Drop: []corev1.Capability{
-									"ALL",
-								},
-							},
-						},
-						Ports: []corev1.ContainerPort{{
-							ContainerPort: 6379,
-							Name:          "redis",
-						}},
-					}},
-				},
-			},
-		},
-	}
-
-	controllerutil.SetOwnerReference(myappresource, deployment, r.Scheme)
+	controllerutil.SetControllerReference(myappresource, deployment, r.Scheme)
 
 	return deployment
 }
@@ -415,7 +520,7 @@ func (r MyAppResourceReconciler) statefulsetForRedis(myappresource *myapigroupv1
 	replicas = 1
 
 	deployment := &appsv1.StatefulSet{
-		ObjectMeta: v1.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      redisName(myappresource.Name),
 			Namespace: myappresource.Namespace,
 			Labels:    lbls,
@@ -442,7 +547,7 @@ func (r MyAppResourceReconciler) statefulsetForRedis(myappresource *myapigroupv1
 						ImagePullPolicy: corev1.PullIfNotPresent,
 						SecurityContext: &corev1.SecurityContext{
 							RunAsNonRoot:             &[]bool{true}[0],
-							RunAsUser:                &[]int64{1001}[0],
+							RunAsUser:                &[]int64{999}[0],
 							AllowPrivilegeEscalation: &[]bool{false}[0],
 							Capabilities: &corev1.Capabilities{
 								Drop: []corev1.Capability{
@@ -454,6 +559,26 @@ func (r MyAppResourceReconciler) statefulsetForRedis(myappresource *myapigroupv1
 							ContainerPort: 6379,
 							Name:          "redis",
 						}},
+						LivenessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								Exec: &corev1.ExecAction{
+									Command: []string{
+										"redis-cli",
+										"ping",
+									},
+								},
+							},
+						},
+						ReadinessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								Exec: &corev1.ExecAction{
+									Command: []string{
+										"redis-cli",
+										"ping",
+									},
+								},
+							},
+						},
 					}},
 					Volumes: []corev1.Volume{
 						{
@@ -468,7 +593,7 @@ func (r MyAppResourceReconciler) statefulsetForRedis(myappresource *myapigroupv1
 		},
 	}
 
-	controllerutil.SetOwnerReference(myappresource, deployment, r.Scheme)
+	controllerutil.SetControllerReference(myappresource, deployment, r.Scheme)
 
 	return deployment
 }
@@ -506,6 +631,7 @@ func (r *MyAppResourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&myapigroupv1alpha1.MyAppResource{}).
 		Owns(&appsv1.Deployment{}).
+		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Complete(r)
 }
