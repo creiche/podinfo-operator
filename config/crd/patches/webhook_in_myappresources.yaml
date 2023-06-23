@@ -2,7 +2,7 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: myappresources.my.api.group.api.group
+  name: myappresources.my.api.group
 spec:
   conversion:
     strategy: Webhook

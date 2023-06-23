@@ -5,9 +5,9 @@ metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.11.1
   creationTimestamp: null
-  name: myappresources.my.api.group.api.group
+  name: myappresources.my.api.group
 spec:
-  group: my.api.group.api.group
+  group: my.api.group
   names:
     kind: MyAppResource
     listKind: MyAppResourceList
@@ -49,12 +49,13 @@ spec:
                 properties:
                   enabled:
                     type: boolean
+                  tag:
+                    default: latest
+                    type: string
                 required:
                 - enabled
                 type: object
               replicaCount:
-                description: Foo is an example field of MyAppResource. Edit myappresource_types.go
-                  to remove/update
                 format: int32
                 type: integer
               resources:

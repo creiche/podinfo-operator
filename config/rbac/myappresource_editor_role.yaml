@@ -12,7 +12,7 @@ metadata:
   name: myappresource-editor-role
 rules:
 - apiGroups:
-  - my.api.group.api.group
+  - my.api.group
   resources:
   - myappresources
   verbs:
@@ -24,7 +24,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - my.api.group.api.group
+  - my.api.group
   resources:
   - myappresources/status
   verbs:

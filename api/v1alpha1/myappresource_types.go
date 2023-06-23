@@ -28,7 +28,6 @@ type MyAppResourceSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
-	// Foo is an example field of MyAppResource. Edit myappresource_types.go to remove/update
 	ReplicaCount int32                      `json:"replicaCount"`
 	Resources    MyAppResourceSpecResources `json:"resources"`
 	Image        MyAppResourceSpecImage     `json:"image"`
@@ -53,6 +52,8 @@ type MyAppResourceSpecUi struct {
 
 type MyAppResourceSpecRedis struct {
 	Enabled bool `json:"enabled"`
+	//+kubebuilder:default:=latest
+	Tag string `json:"tag,omitempty"`
 }
 
 // MyAppResourceStatus defines the observed state of MyAppResource
