@@ -97,10 +97,10 @@ var _ = Describe("MyAppResource controller", func() {
 				return k8sClient.Get(ctx, typePodinfoNamespaceName, foundPodinfoService)
 			}, time.Minute, time.Second).Should(Succeed())
 
-			By("Checking if Redis Deployment was successfully created in the reconciliation")
-			foundRedisDeployment := &appsv1.Deployment{}
+			By("Checking if Redis StatefulSet was successfully created in the reconciliation")
+			foundRedisStatefulSet := &appsv1.StatefulSet{}
 			Eventually(func() error {
-				return k8sClient.Get(ctx, typeRedisNamespaceName, foundRedisDeployment)
+				return k8sClient.Get(ctx, typeRedisNamespaceName, foundRedisStatefulSet)
 			}, time.Minute, time.Second).Should(Succeed())
 
 			By("Checking if Redis Service was successfully created in the reconciliation")

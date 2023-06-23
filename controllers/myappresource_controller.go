@@ -74,7 +74,7 @@ func (r *MyAppResourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	if myappresource.Spec.Redis.Enabled == true {
-		err = r.EnsureDeployment(ctx, *r.deploymentForRedis(myappresource))
+		err = r.EnsureStatefulSet(ctx, *r.statefulsetForRedis(myappresource))
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -84,7 +84,7 @@ func (r *MyAppResourceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			return ctrl.Result{}, err
 		}
 	} else {
-		r.Client.Delete(ctx, r.deploymentForRedis(myappresource))
+		r.Client.Delete(ctx, r.statefulsetForRedis(myappresource))
 		r.Client.Delete(ctx, r.serviceForRedis(myappresource))
 	}
 
@@ -145,6 +145,50 @@ func (r *MyAppResourceReconciler) EnsureDeployment(ctx context.Context, deployme
 	return nil
 }
 
+func (r *MyAppResourceReconciler) EnsureStatefulSet(ctx context.Context, statefulset appsv1.StatefulSet) error {
+	found := &appsv1.StatefulSet{}
+
+	err := r.Get(ctx, types.NamespacedName{Namespace: statefulset.Namespace, Name: statefulset.Name}, found)
+	if err != nil && apierrors.IsNotFound(err) {
+		if err = r.Create(ctx, &statefulset); err != nil {
+			log.Log.Error(err, "Failed to create statefulset", "statefulset.Namespace", statefulset.Namespace, "statefulset.Name", statefulset.Name)
+			return err
+		}
+		return nil
+	}
+
+	changed := false
+
+	if found.Spec.Template.Spec.Containers[0].Image != statefulset.Spec.Template.Spec.Containers[0].Image {
+		found.Spec.Template.Spec.Containers[0].Image = statefulset.Spec.Template.Spec.Containers[0].Image
+		changed = true
+	}
+
+	if !reflect.DeepEqual(found.Spec.Template.Spec.Containers[0].Env, statefulset.Spec.Template.Spec.Containers[0].Env) {
+		found.Spec.Template.Spec.Containers[0].Env = statefulset.Spec.Template.Spec.Containers[0].Env
+		changed = true
+	}
+
+	if found.Spec.Replicas != statefulset.Spec.Replicas {
+		found.Spec.Replicas = statefulset.Spec.Replicas
+		changed = true
+	}
+
+	if !reflect.DeepEqual(found.Spec.Template.Spec.Containers[0].Resources, statefulset.Spec.Template.Spec.Containers[0].Resources) {
+		found.Spec.Template.Spec.Containers[0].Resources = statefulset.Spec.Template.Spec.Containers[0].Resources
+		changed = true
+	}
+
+	if changed == true {
+		if err = r.Update(ctx, found); err != nil {
+			log.Log.Error(err, "Failed to update statefulset", "statefulset.Namespace", statefulset.Namespace, "statefulset.Name", statefulset.Name)
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (r *MyAppResourceReconciler) EnsureService(ctx context.Context, service corev1.Service) error {
 	found := &corev1.Service{}
 
@@ -159,9 +203,14 @@ func (r *MyAppResourceReconciler) EnsureService(ctx context.Context, service cor
 
 	changed := false
 
+	if !reflect.DeepEqual(found.Spec.Selector, service.Spec.Selector) {
+		found.Spec.Selector = service.Spec.Selector
+		changed = true
+	}
+
 	if changed == true {
 		if err = r.Update(ctx, found); err != nil {
-			log.Log.Error(err, "Failed to update deployment", "service.Namespace", service.Namespace, "service.Name", service.Name)
+			log.Log.Error(err, "Failed to update service", "service.Namespace", service.Namespace, "service.Name", service.Name)
 			return err
 		}
 	}
@@ -191,6 +240,8 @@ func (r *MyAppResourceReconciler) serviceForPodinfo(myappresource *myapigroupv1a
 		},
 	}
 
+	controllerutil.SetOwnerReference(myappresource, service, r.Scheme)
+
 	return service
 }
 
@@ -215,6 +266,8 @@ func (r *MyAppResourceReconciler) serviceForRedis(myappresource *myapigroupv1alp
 			Type:     corev1.ServiceTypeClusterIP,
 		},
 	}
+
+	controllerutil.SetOwnerReference(myappresource, service, r.Scheme)
 
 	return service
 }
@@ -355,6 +408,71 @@ func (r MyAppResourceReconciler) deploymentForRedis(myappresource *myapigroupv1a
 	return deployment
 }
 
+func (r MyAppResourceReconciler) statefulsetForRedis(myappresource *myapigroupv1alpha1.MyAppResource) *appsv1.StatefulSet {
+	lbls := labelsForRedis(myappresource)
+
+	var replicas int32
+	replicas = 1
+
+	deployment := &appsv1.StatefulSet{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      redisName(myappresource.Name),
+			Namespace: myappresource.Namespace,
+			Labels:    lbls,
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: lbls,
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: lbls,
+				},
+				Spec: corev1.PodSpec{
+					SecurityContext: &corev1.PodSecurityContext{
+						RunAsNonRoot: &[]bool{true}[0],
+						SeccompProfile: &corev1.SeccompProfile{
+							Type: corev1.SeccompProfileTypeRuntimeDefault,
+						},
+					},
+					Containers: []corev1.Container{{
+						Image:           "redis:" + myappresource.Spec.Redis.Tag,
+						Name:            "redis",
+						ImagePullPolicy: corev1.PullIfNotPresent,
+						SecurityContext: &corev1.SecurityContext{
+							RunAsNonRoot:             &[]bool{true}[0],
+							RunAsUser:                &[]int64{1001}[0],
+							AllowPrivilegeEscalation: &[]bool{false}[0],
+							Capabilities: &corev1.Capabilities{
+								Drop: []corev1.Capability{
+									"ALL",
+								},
+							},
+						},
+						Ports: []corev1.ContainerPort{{
+							ContainerPort: 6379,
+							Name:          "redis",
+						}},
+					}},
+					Volumes: []corev1.Volume{
+						{
+							Name: "data",
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	controllerutil.SetOwnerReference(myappresource, deployment, r.Scheme)
+
+	return deployment
+}
+
 func labelsForPodInfo(myappresource *myapigroupv1alpha1.MyAppResource) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       podinfoName(myappresource.Name),
@@ -388,5 +506,6 @@ func (r *MyAppResourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&myapigroupv1alpha1.MyAppResource{}).
 		Owns(&appsv1.Deployment{}).
+		Owns(&corev1.Service{}).
 		Complete(r)
 }
