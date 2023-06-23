@@ -2,26 +2,99 @@
 Operator to setup and manage podinfo with a redis backend
 
 ## Getting Started
+
+### Running unit tests
+
+Unit tests have been created to test the functions of the controller using envtest without the need for a cluster:
+
+```sh
+make test
+```
+
+### Running locally on your laptop
 You’ll need a Kubernetes cluster to run against. You can use [KIND](https://sigs.k8s.io/kind) to get a local cluster for testing, or run against a remote cluster.
 **Note:** Your controller will automatically use the current context in your kubeconfig file (i.e. whatever cluster `kubectl cluster-info` shows).
 
-### Running on the cluster
-1. Install Instances of Custom Resources:
+1. Install Instances of CRDs:
+
+```sh
+make install
+```
+
+2. Run the controller locally on your laptop:
+
+```sh
+make run
+```
+
+3. Create sample resource:
 
 ```sh
 kubectl apply -f config/samples/
 ```
 
-2. Build and push your image to the location specified by `IMG`:
+Sample resource created:
+```yaml
+apiVersion: my.api.group/v1alpha1
+kind: MyAppResource
+metadata:
+  labels:
+    app.kubernetes.io/name: myappresource
+    app.kubernetes.io/instance: myappresource-sample
+    app.kubernetes.io/part-of: podinfo-operator
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: podinfo-operator
+  name: myappresource-sample
+spec:
+  replicaCount: 2
+  resources:
+    memoryLimit: 64Mi
+    cpuRequest: 100m
+  image:
+    repository: ghcr.io/stefanprodan/podinfo
+    tag: latest
+  ui:
+    color: "#34577c"
+    message: "some string"
+  redis:
+    enabled: true
+```
+
+### Deploying Controller to the cluster
+You will need to push the docker image to somewhere that your local cluster can pull from.
+
+1. Build and Push Image:
 
 ```sh
 make docker-build docker-push IMG=<some-registry>/podinfo-operator:tag
 ```
 
-3. Deploy the controller to the cluster with the image specified by `IMG`:
+2. Deploy controller to cluster:
 
 ```sh
 make deploy IMG=<some-registry>/podinfo-operator:tag
+```
+
+### Testing Application
+
+1. Setup port forwarding to the Podinfo service:
+
+```sh
+kubectl port-forward svc/myappresource-sample-podinfo 8888:80
+```
+
+2. Open a browser to `http://localhost:8888/`
+
+3. Post data to test Redis connectivity
+
+```sh
+curl -X POST localhost:8888/cache/{key} --data {data}
+```
+
+4. Get data back to ensure Redis connectivity
+
+```sh
+curl localhost:8888/cache/{key}
 ```
 
 ### Uninstall CRDs
@@ -37,55 +110,3 @@ UnDeploy the controller from the cluster:
 ```sh
 make undeploy
 ```
-
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-### How it works
-This project aims to follow the Kubernetes [Operator pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/).
-
-It uses [Controllers](https://kubernetes.io/docs/concepts/architecture/controller/),
-which provide a reconcile function responsible for synchronizing resources until the desired state is reached on the cluster.
-
-### Test It Out
-1. Install the CRDs into the cluster:
-
-```sh
-make install
-```
-
-2. Run your controller (this will run in the foreground, so switch to a new terminal if you want to leave it running):
-
-```sh
-make run
-```
-
-**NOTE:** You can also run this in one step by running: `make install run`
-
-### Modifying the API definitions
-If you are editing the API definitions, generate the manifests such as CRs or CRDs using:
-
-```sh
-make manifests
-```
-
-**NOTE:** Run `make --help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
-
-## License
-
-Copyright 2023.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
