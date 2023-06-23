@@ -1,0 +1,23 @@
+apiVersion: my.api.group/v1alpha1
+kind: MyAppResource
+metadata:
+  labels:
+    app.kubernetes.io/name: myappresource
+    app.kubernetes.io/instance: myappresource-sample
+    app.kubernetes.io/part-of: podinfo-operator
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: podinfo-operator
+  name: myappresource-sample
+spec:
+  replicaCount: 2
+  resources:
+    memoryLimit: 64Mi
+    cpuRequest: 100m
+  image:
+    repository: ghcr.io/stefanprodan/podinfo
+    tag: latest
+  ui:
+    color: "#34577c"
+    message: "some string"
+  redis:
+    enabled: true
